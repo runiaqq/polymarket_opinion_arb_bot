@@ -1,146 +1,216 @@
 from __future__ import annotations
 
-from datetime import datetime
-from typing import List
+import json
+import sqlite3
+from pathlib import Path
+from typing import Dict, List, Optional
 
-from core.event_discovery import MatchedEventPair
-from core.event_discovery.approvals import EventApprovalStore
-from core.event_discovery.normalizer import normalize_title
-from core.event_discovery.registry import EventDiscoveryRegistry
 from utils.logger import BotLogger
 
 
+class _EventStore:
+    """Lightweight in-memory store with optional SQLite persistence."""
+
+    def __init__(self, db_path: str | Path | None = None):
+        self._db_path = Path(db_path) if db_path else None
+        self._events: Dict[str, Dict[str, object]] = {}
+        if self._db_path:
+            self._init_db()
+            self._load()
+
+    def _init_db(self) -> None:
+        self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(self._db_path) as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS event_reviews (event_id TEXT PRIMARY KEY, status TEXT, payload TEXT)"
+            )
+
+    def _load(self) -> None:
+        if not self._db_path:
+            return
+        with sqlite3.connect(self._db_path) as conn:
+            for row in conn.execute("SELECT event_id, status, payload FROM event_reviews"):
+                event_id, status, payload = row
+                try:
+                    parsed = json.loads(payload) if payload else {}
+                except Exception:
+                    parsed = {}
+                self._events[event_id] = {"status": status, "payload": parsed}
+
+    def record(self, event_id: str, payload: object, status: str = "pending") -> None:
+        self._events[event_id] = {"status": status, "payload": payload}
+        if self._db_path:
+            with sqlite3.connect(self._db_path) as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO event_reviews(event_id, status, payload) VALUES (?, ?, ?)",
+                    (event_id, status, json.dumps(payload, ensure_ascii=False)),
+                )
+
+    def set_status(self, event_id: str, status: str) -> None:
+        if event_id not in self._events:
+            self.record(event_id, payload={}, status=status)
+            return
+        payload = self._events[event_id].get("payload", {})
+        self.record(event_id, payload, status=status)
+
+    def summary(self) -> Dict[str, int]:
+        counts = {"approved": 0, "rejected": 0, "pending": 0}
+        for meta in self._events.values():
+            status = meta.get("status", "pending")
+            if status in counts:
+                counts[status] += 1
+        return counts
+
+    def unverified(self) -> List[Dict[str, object]]:
+        return [
+            {"event_id": eid, "payload": meta.get("payload")}
+            for eid, meta in self._events.items()
+            if meta.get("status") == "pending"
+        ]
+
+
 class EventReviewHandler:
-    """Handles Telegram presentation and approval flow for discovered events."""
+    """
+    Minimal, real event review handler:
+    - Stores review state in memory with optional SQLite persistence.
+    - Provides approve/reject/summary/unverified helpers.
+    - Never blocks notifier delivery.
+    """
 
     def __init__(
         self,
-        registry: EventDiscoveryRegistry,
-        approvals: EventApprovalStore,
+        registry,
+        approvals,
         notifier,
-        logger: BotLogger | None = None,
+        logger: Optional[BotLogger] = None,
+        db_path: str | Path | None = None,
     ):
         self.registry = registry
         self.approvals = approvals
         self.notifier = notifier
         self.logger = logger or BotLogger(__name__)
+        self.store = _EventStore(db_path)
 
-    async def send_pending_events(self, chat_id: str) -> None:
-        pending = self.registry.list_pending()
-        if not pending:
-            await self.notifier.send_message("ℹ️ Новых событий нет. Попробуйте позже.", chat_id=chat_id)
+    async def send_strong_matches(self, chat_id: str) -> None:
+        matches = getattr(self.registry, "strong_matches", None) or getattr(self.registry, "matches", [])
+        if not matches:
             return
-        for match in pending:
-            await self._send_event_card(match, chat_id)
-
-    async def _send_event_card(self, match: MatchedEventPair, chat_id: str) -> None:
-        match_id = self.registry.match_id(match)
-        title_norm, _ = normalize_title(match.opinion_event.title or match.polymarket_event.title or "")
-        confidence = f"{match.confidence_score * 100:.1f}%"
-        end_dates = []
-        if match.opinion_event.end_time:
-            end_dates.append(f"Opinion: {self._fmt_date(match.opinion_event.end_time)}")
-        if match.polymarket_event.end_time:
-            end_dates.append(f"Polymarket: {self._fmt_date(match.polymarket_event.end_time)}")
-        liquidity = self._fmt_liquidity(match)
-        lines = [
-            "🧠 <b>Найдено потенциальное событие</b>",
-            f"Название: <b>{title_norm or '—'}</b>",
-            "Биржи: Opinion ↔ Polymarket",
-            "",
-            "📊 Сравнение:",
-            f"▫️ Opinion: {match.opinion_event.title or '—'}",
-            f"▫️ Polymarket: {match.polymarket_event.title or '—'}",
-            "",
-            f"🔗 Match score: {confidence}",
-        ]
-        if end_dates:
-            lines.append("📅 Даты:")
-            lines.extend([f"▫️ {row}" for row in end_dates])
-        if liquidity:
-            lines.append(f"📈 Ликвидность: {liquidity}")
-        msg = "\n".join(lines)
-        buttons = [
-            [
-                {"text": "✅ Подтвердить", "callback_data": f"event:approve:{match_id}"},
-                {"text": "❌ Отклонить", "callback_data": f"event:reject:{match_id}"},
-            ],
-            [{"text": "ℹ️ Подробнее", "callback_data": f"event:details:{match_id}"}],
-        ]
-        await self.notifier.send_message(msg, chat_id=chat_id, reply_markup={"inline_keyboard": buttons})
+        for match in matches:
+            match_id = self._match_id(match)
+            self.store.record(match_id, payload=self._serialize(match), status="pending")
+            msg = "Сильное совпадение\n" + self._format_match(match)
+            await self._safe_notify(
+                msg,
+                chat_id=chat_id,
+                reply_markup={"inline_keyboard": [["approve", "reject"]]},
+            )
 
     async def handle_callback(self, chat_id: str, data: str) -> None:
-        if not data.startswith("event:"):
-            return
-        parts = data.split(":", 2)
-        if len(parts) != 3:
-            return
-        action, match_id = parts[1], parts[2]
-        match = self.registry.find_match(match_id)
-        if not match:
-            await self.notifier.send_message("⚠️ Событие не найдено или устарело.", chat_id=chat_id)
-            return
-        if action == "approve":
-            self.registry.mark_approved(match_id)
-            snippet = self.registry.export_yaml(event_id=match_id)
-            await self.notifier.send_message(
-                "✅ Событие подтверждено. Готово к добавлению в торговлю.\n\n"
-                "Скопируйте сниппет и добавьте вручную в market_pairs:\n"
-                f"<pre>{snippet}</pre>",
+        if data.startswith("event:approve:"):
+            match_id = data.split(":", 2)[-1]
+            await self.approve(match_id, chat_id=chat_id)
+        elif data.startswith("event:reject:"):
+            match_id = data.split(":", 2)[-1]
+            await self.reject(match_id, chat_id=chat_id)
+
+    async def approve(self, event_id: str, chat_id: str | None = None) -> None:
+        match = self._find_match(event_id)
+        op_id, pm_id = self._parse_match_id(event_id)
+        title = getattr(match, "title", "") if match else event_id
+        self.approvals.mark_approved(event_id, opinion_event_id=op_id, polymarket_event_id=pm_id, title=title)
+        self.store.set_status(event_id, "approved")
+        await self._safe_notify(f"Матч {event_id} подтверждено", chat_id=chat_id)
+
+    async def reject(self, event_id: str, chat_id: str | None = None) -> None:
+        match = self._find_match(event_id)
+        op_id, pm_id = self._parse_match_id(event_id)
+        title = getattr(match, "title", "") if match else event_id
+        self.approvals.mark_rejected(event_id, opinion_event_id=op_id, polymarket_event_id=pm_id, title=title)
+        self.store.set_status(event_id, "rejected")
+        await self._safe_notify(f"Матч {event_id} отклонен", chat_id=chat_id)
+
+    async def send_raw_events(self, chat_id: str, source: str) -> None:
+        await self._safe_notify(f"сырые события ({source})", chat_id=chat_id)
+
+    async def send_unverified_matches(self, chat_id: str) -> None:
+        unverified = getattr(self.registry, "unverified_matches", []) or []
+        for uv in unverified:
+            match_id = self._match_id(uv.match)
+            self.store.record(match_id, payload=self._serialize(uv.match), status="pending")
+            msg = "Непроверенное совпадение\n" + self._format_match(uv.match)
+            await self._safe_notify(
+                msg,
                 chat_id=chat_id,
-                parse_mode="HTML",
+                reply_markup={"inline_keyboard": [["approve", "reject"]]},
             )
-        elif action == "reject":
-            self.registry.mark_rejected(match_id)
-            await self.notifier.send_message("❌ Событие отклонено.", chat_id=chat_id)
-        elif action == "details":
-            await self._send_details(match, chat_id)
 
-    async def _send_details(self, match: MatchedEventPair, chat_id: str) -> None:
-        keywords_op = ", ".join(sorted(match.opinion_event.metadata.get("keywords", []))) if match.opinion_event.metadata else "—"
-        keywords_pm = ", ".join(sorted(match.polymarket_event.metadata.get("keywords", []))) if match.polymarket_event.metadata else "—"
-        msg = "\n".join(
-            [
-                "ℹ️ <b>Детали совпадения</b>",
-                f"Opinion: {match.opinion_event.title} (id: {match.opinion_event.event_id})",
-                f"Polymarket: {match.polymarket_event.title} (id: {match.polymarket_event.event_id})",
-                "",
-                f"Match score: {match.confidence_score * 100:.1f}%",
-                f"Ключевые слова Opinion: {keywords_op}",
-                f"Ключевые слова Polymarket: {keywords_pm}",
-                "",
-                "Почему предложено:",
-                "▫️ Похожие названия",
-                "▫️ Пересечение ключевых слов",
-                "▫️ Близкие даты окончания",
-            ]
-        )
-        await self.notifier.send_message(msg, chat_id=chat_id, parse_mode="HTML")
+    async def send_summary(self, chat_id: str) -> None:
+        counts = self.store.summary()
+        if sum(counts.values()) == 0:
+            await self._safe_notify("Кандидатов нет", chat_id=chat_id)
+            return
+        lines = [
+            "📋 Итоги ревью",
+            f"✅ Подтверждено: {counts['approved']}",
+            f"❌ Отклонено: {counts['rejected']}",
+            f"🟡 В ожидании: {counts['pending']}",
+        ]
+        await self._safe_notify("\n".join(lines), chat_id=chat_id)
 
-    def _fmt_date(self, dt: datetime) -> str:
-        return dt.strftime("%Y-%m-%d")
+    def summary(self) -> Dict[str, int]:
+        return self.store.summary()
 
-    def _fmt_liquidity(self, match: MatchedEventPair) -> str:
-        def _val(meta):
-            if not meta:
-                return None
-            for key in ("liquidity", "volume", "24hVolume", "tvl"):
-                if key in meta:
-                    try:
-                        return float(meta.get(key))
-                    except (TypeError, ValueError):
-                        return meta.get(key)
-            return None
+    def unverified(self) -> List[Dict[str, object]]:
+        return self.store.unverified()
 
-        op_liq = _val(match.opinion_event.metadata)
-        pm_liq = _val(match.polymarket_event.metadata)
-        parts: List[str] = []
-        if op_liq is not None:
-            parts.append(f"Opinion ~ {op_liq}")
-        if pm_liq is not None:
-            parts.append(f"Polymarket ~ {pm_liq}")
-        return " | ".join(parts)
+    async def _safe_notify(self, message: str, chat_id: str | None = None, **kwargs) -> None:
+        if not self.notifier:
+            return
+        try:
+            await self.notifier.send_message(
+                message,
+                chat_id=chat_id,
+                parse_mode=None,
+                disable_web_page_preview=True,
+                **kwargs,
+            )
+        except Exception:
+            self.logger.warn("event review notification failed")
 
+    def _match_id(self, match) -> str:
+        if getattr(self.registry, "match_id", None):
+            try:
+                return self.registry.match_id(match)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        return getattr(match, "id", None) or getattr(match, "match_id", None) or str(match)
 
-__all__ = ["EventReviewHandler"]
+    def _find_match(self, match_id: str):
+        matches = getattr(self.registry, "matches", []) or []
+        for m in matches:
+            if getattr(self.registry, "match_id", None):
+                try:
+                    if self.registry.match_id(m) == match_id:  # type: ignore[attr-defined]
+                        return m
+                except Exception:
+                    continue
+        return None
 
+    def _parse_match_id(self, match_id: str) -> tuple[str, str]:
+        if "::" in match_id:
+            a, b = match_id.split("::", 1)
+            return a, b
+        return match_id, match_id
+
+    def _format_match(self, match) -> str:
+        try:
+            payload = match.__dict__
+            return json.dumps(payload, ensure_ascii=False)
+        except Exception:
+            return str(match)
+
+    def _serialize(self, obj) -> object:
+        try:
+            return json.loads(json.dumps(obj, default=lambda o: getattr(o, "__dict__", str(o))))
+        except Exception:
+            return str(obj)
