@@ -35,8 +35,9 @@ class Fill:
     fill_id: Optional[str]
     size: Decimal
     price: Decimal
-    side: Literal["BUY", "SELL"]
-    ts: datetime
+    fee: Decimal = Decimal("0")
+    side: Literal["BUY", "SELL"] = "BUY"
+    ts: datetime = field(default_factory=datetime.utcnow)
 
 
 @dataclass(slots=True)

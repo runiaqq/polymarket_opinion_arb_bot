@@ -137,3 +137,30 @@ class AccountPool:
             for account_id, worker in self._workers.items()
         }
 
+
+class AccountSelector:
+    """
+    Simple account selector with pluggable policy.
+
+    Default behaviour matches legacy "first account"; round_robin is ready for
+    multi-account deployments.
+    """
+
+    def __init__(self, accounts: List[AccountCredentials], policy: str = "first"):
+        self.accounts = list(accounts)
+        self.policy = policy or "first"
+        self._cursor = 0
+
+    def select(self, preferred_id: str | None = None) -> Optional[AccountCredentials]:
+        if preferred_id:
+            for acc in self.accounts:
+                if acc.account_id == preferred_id:
+                    return acc
+        if not self.accounts:
+            return None
+        if self.policy == "round_robin":
+            acc = self.accounts[self._cursor % len(self.accounts)]
+            self._cursor = (self._cursor + 1) % len(self.accounts)
+            return acc
+        return self.accounts[0]
+
