@@ -1,164 +1,129 @@
-# Market Hedge Trading Engine
+# Arb Core — Covered Arbitrage Bot
 
-Async market-hedging engine that arbitrages prediction markets between [Polymarket](https://docs.polymarket.com/developers/gamma-markets-api/overview) and [Opinion](https://docs.opinion.trade/developer-guide/api-references/models). The bot routes primary limit orders to one venue, listens for fills via websocket, and immediately hedges filled size on the opposing venue using market/IOC orders while enforcing configurable risk and slippage controls.
+Arbitrage bot for prediction markets. Trades the same event on [Polymarket](https://polymarket.com) and [Opinion](https://opinion.trade), locking profit when YES + NO prices add up to less than $1.
 
-## Features
+---
 
-- **Async REST + WebSocket clients** with retry/backoff, per-account rate limiting, and proxy-aware sessions (Opinion supports realtime websockets; Polymarket currently relies on REST polling).
-- **Market hedging workflow**: spread analysis, primary order placement, fill tracking, automated hedging with slippage-aware sizing, and optional dry-run mode.
-- **Multi-account support**: independent API credentials & proxies per account; configurable market pairs map primary/secondary accounts per event.
-- **Risk & compliance**: balance, exposure, and slippage checks plus incident logging.
-- **Persistence**: async database layer supporting SQLite (default) and PostgreSQL (asyncpg) storing orders, trades, positions, and incidents.
-- **Observability**: structured logger + Telegram notifier for fills, hedges, and incidents.
-- **Tests**: pytest suite covering spread logic, orderbook math, hedger behavior, order manager routing, and API client integration points.
+## Core idea
+
+Binary markets: YES + NO = $1 at resolution.  
+If you buy YES at 0.45 and NO at 0.50, you pay $0.95 and receive $1.00. Profit = $0.05 per share.
+
+The bot finds such mispricings across Polymarket and Opinion and places both legs so the outcome is locked in regardless of the result.
+
+---
+
+## How it works
+
+1. **Pair setup** — You pick a market that exists on both platforms (same question/event) and link the YES/NO tokens.
+2. **Spread check** — The bot compares orderbooks: if `PM_ask + OP_ask < 1 - fees - min_profit`, it enters.
+3. **Trading** — Two modes:
+   - **Covered-Arb** — Two limit orders at once; both must fill.
+   - **Market-Hedge** — Two limits; when one fills, the other is cancelled and a market order closes the position on the other exchange.
+4. **Resolution** — When the event resolves, you get $1 per share. No directional risk.
+
+---
+
+## Quick start
+
+```bash
+pip install -r requirements.txt
+cp config/accounts.example.json config/accounts.json
+cp config/settings.example.yaml config/settings.yaml
+# edit both with your API keys, wallets, and Telegram token
+python -m arb_core.main --health
+python -m arb_core.main --dry-run
+```
+
+**Flags:** `--dry-run` (no real orders), `--no-telegram` (no bot), `--market-hedge` (use market-hedge mode).
+
+---
 
 ## Requirements
 
 - Python 3.10+
-- Access to the official exchange APIs and websockets (see doc links above)
-- For PostgreSQL mode: running instance reachable by the bot
+- Accounts on Polymarket (USDC, Polygon) and Opinion (USDT, BSC)
+- Optional: Google Sheet for pair list, Telegram for control and alerts
 
-## Installation
+---
 
-```bash
-python -m venv .venv
-. .venv/Scripts/activate  # Windows
-pip install -r requirements.txt
+## Project layout
+
+```
+arb_core/
+├── core/          — config, models, store, math
+├── market_data/   — orderbook fetch
+├── exchanges/     — Polymarket & Opinion clients
+├── runners/       — Covered-Arb and Market-Hedge logic
+├── integrations/  — Sheets sync, token resolvers
+├── ui/            — Telegram bot
+└── tests/
 ```
 
-## Configuration
+See `docs/TRADING_SETUP.md` for account setup.
 
-Copy the provided templates and fill in your secrets locally (the real files are `.gitignore`d so they never reach Git). For example:
+---
+
+# Arb Core — Бот для покрытого арбитража
+
+Бот для арбитражной торговли на рынках предсказаний. Торгует одним и тем же событием на [Polymarket](https://polymarket.com) и [Opinion](https://opinion.trade), фиксируя прибыль, когда сумма цен YES + NO меньше $1.
+
+---
+
+## Идея
+
+Бинарные рынки: YES + NO = $1 при резолюции.  
+Если купить YES по 0.45 и NO по 0.50, платим $0.95, получаем $1.00. Прибыль — $0.05 с акции.
+
+Бот находит такие несоответствия между Polymarket и Opinion и выставляет обе ноги так, чтобы исход был зафиксирован при любом результате.
+
+---
+
+## Как устроен бот
+
+1. **Настройка пары** — выбираешь рынок, который есть на обеих площадках (одинаковый вопрос), и связываешь токены YES/NO.
+2. **Проверка спреда** — бот сравнивает стаканы: входит, если `PM_ask + OP_ask < 1 - комиссии - мин.прибыль`.
+3. **Торговля** — два режима:
+   - **Covered-Arb** — два лимитных ордера одновременно; оба должны исполниться.
+   - **Market-Hedge** — два лимита; когда один исполняется, второй отменяется и рыночным ордером хеджируется позиция на другой бирже.
+4. **Резолюция** — при разрешении события получаешь $1 за акцию. Направленного риска нет.
+
+---
+
+## Быстрый старт
 
 ```bash
+pip install -r requirements.txt
 cp config/accounts.example.json config/accounts.json
 cp config/settings.example.yaml config/settings.yaml
+# заполни API ключи, кошельки и Telegram
+python -m arb_core.main --health
+python -m arb_core.main --dry-run
 ```
 
-> 🔒 **Security reminder**: rotate any credentials that were committed previously and use environment-specific overrides such as `config/accounts.local.json` if you need multiple setups. The loader automatically falls back to `.local` / `.example` files whenever the primary config is missing.
+**Флаги:** `--dry-run` (без реальных ордеров), `--no-telegram` (без бота), `--market-hedge` (режим market-hedge).
 
-### `config/accounts.json`
+---
 
-Provide every trading account with its exchange, API keys, and proxy:
+## Что нужно
 
-```json
-{
-  "accounts": [
-    {
-      "account_id": "opinion_acc",
-      "exchange": "Opinion",
-      "api_key": "OPINION_API_KEY",
-      "secret_key": "OPINION_SECRET",
-      "private_key": "0xOPINION_SIGNER_PRIVATE_KEY",
-      "multi_sig_address": "0xSafeOrWallet",
-      "rpc_url": "https://bsc-dataseed.binance.org",
-      "chain_id": 56,
-      "host": "https://proxy.opinion.trade:8443",
-      "ws_url": "wss://ws.opinion.trade/v1",
-      "proxy": "http://user:pass@host:port"
-    },
-    {
-      "account_id": "poly_acc",
-      "exchange": "Polymarket",
-      "api_key": "POLYMARKET_API_KEY",
-      "secret_key": "POLYMARKET_SECRET",
-      "proxy": "http://user:pass@host:port"
-    }
-  ]
-}
+- Python 3.10+
+- Аккаунты на Polymarket (USDC, Polygon) и Opinion (USDT, BSC)
+- Опционально: Google Таблица со списком пар, Telegram для управления и уведомлений
+
+---
+
+## Структура проекта
+
+```
+arb_core/
+├── core/          — конфиг, модели, хранилище, расчёты
+├── market_data/   — загрузка стаканов
+├── exchanges/     — клиенты Polymarket и Opinion
+├── runners/       — логика Covered-Arb и Market-Hedge
+├── integrations/  — синхронизация Sheets, резолверы токенов
+├── ui/            — Telegram-бот
+└── tests/
 ```
 
-> ℹ️ **Secrets**: load `api_key`, `private_key`, and `multi_sig_address` from environment variables or a secret manager before writing the file, or template the JSON to read via `dotenv`. The Opinion SDK requires an API key **and** the signer private key + multi-sig portfolio address to build EIP712 signatures.
-
-### `config/settings.yaml`
-
-- `market_hedge_mode`: hedge ratio, slippage caps, spread threshold, exposure limits, cancel timers, etc.
-- `exchanges.primary/secondary`: choose which venue receives limit legs vs hedge legs.
-- `market_pairs`: map shared event IDs to per-exchange market identifiers and (optionally) specific account IDs to use for that pair.
-- `database`: `backend` (`sqlite` or `postgres`) and DSN (`sqlite+aiosqlite:///path.db` or postgres URL).
-- `telegram`: enable + bot token/chat ID for notifications.
-- `rate_limits`: per-exchange request ceilings.
-- `connectivity`: per-exchange flags to enable websockets (`use_websocket: true`) or fall back to REST polling with `poll_interval` in seconds. By default Polymarket is polled while Opinion uses websockets.
-- `dry_run`: keep logic running without sending live orders.
-
-### API Docs
-
-Implementation follows the public specs:
-
-- Polymarket Gamma & CLOB: <https://docs.polymarket.com/developers/gamma-markets-api/overview>
-- Opinion CLOB SDK/API: <https://docs.opinion.trade/developer-guide/api-references/models> and <https://docs.opinion.trade/developer-guide/api-references/methods>
-
-## Usage
-
-```bash
-python main.py
-```
-
-The engine will:
-
-1. Load settings + accounts.
-2. Spin up per-account aiohttp sessions with proxies and rate limiters.
-3. For each exchange, either start websocket listeners (if `use_websocket: true`) or launch REST polling loops for fills (used by Polymarket due to missing public WS feed).
-4. For each configured `market_pair`, continuously evaluate spreads and place limit orders on the primary venue whenever spread ≥ `min_spread_for_entry`. Every fill triggers instantaneous hedging on the secondary venue while respecting `hedge_ratio` and slippage limits.
-5. Persist all orders/trades/positions and push Telegram notifications for hedge events or incidents.
-
-Stop the bot with `CTRL+C`. The shutdown hook drains tasks, closes websockets, sessions, and DB connections cleanly.
-
-## Testing
-
-```bash
-make test          # runs pytest -q (fast suite, skips stress)
-make test-stress   # runs pytest -q -m stress
-```
-
-Tests rely purely on mocks/fixtures (no external API calls) and cover:
-
-- Spread math & profitability gating
-- Orderbook depth/slippage calculations
-- Hedger (single-leg + multi-leg) trade persistence, slippage, and failure handling
-- OrderManager fill routing and hedge triggering
-- API client payload normalization for both venues
-- Reconciliation layer (websocket + poll dedupe)
-- Webhook + Google Sheets sync endpoints
-- Stress harness with 100+ mock accounts (marked `@pytest.mark.stress`)
-
-### End-to-End Harness
-
-The `tests/e2e` suite spins up mocked Opinion/Polymarket endpoints using `pytest-asyncio` + `aioresponses` and validates:
-
-1. Market mapping + order placement
-2. Partial fills emitted via websocket or polling
-3. Hedger invocation and trade persistence
-
-Run locally with:
-
-```bash
-pytest tests/e2e -q
-```
-
-By default it uses SQLite and `dry_run=true`; set `E2E_USE_REAL_DB=1` to point to a live Postgres DSN.
-
-## Telemetry
-
-`utils/telemetry.py` provides lightweight counters (`hedge_attempts`, `hedge_success`, `hedge_failures`) and a slippage histogram.
-
-- Enable Prometheus export by setting `ENABLE_PROMETHEUS=1` (listens on port 9000 by default).
-- Without Prometheus, telemetry logs snapshots every 60 seconds.
-
-Integrations can push custom metrics by injecting the `Telemetry` instance into hedger/order manager components.
-
-## Extending
-
-- Add more `market_pairs` to scale coverage.
-- Implement strategy modules that generate limit orders beyond the built-in spread trigger.
-- Wire additional persistence sinks (e.g., Kafka) by extending `Database`.
-- Introduce structured JSON logging or plug into observability stacks.
-
-## Safety Notes
-
-- Keep `dry_run: true` until sandbox credentials and configs are verified.
-- Double-check `market_pairs` to ensure market IDs align between exchanges.
-- Review per-exchange rate limits and API docs before increasing order throughput.
-- **Polymarket latency warning**: when `use_websocket: false`, fills are detected via periodic REST polling. Hedging actions can lag during network congestion; size your risk limits accordingly.
-
-
+Подробнее: `docs/TRADING_SETUP.md`.

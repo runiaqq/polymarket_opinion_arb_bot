@@ -1,34 +1,40 @@
 {
   "accounts": [
     {
-      "account_id": "opinion_acc",
-      "exchange": "Opinion",
-      "api_key": "YOUR_OPINION_API_KEY",
-      "secret_key": "YOUR_OPINION_SECRET",
-      "private_key": "0xYOUR_PRIVATE_KEY",
-      "multi_sig_address": "0xyourmultisigaddress",
-      "rpc_url": "https://example-rpc-url",
-      "chain_id": 56,
-      "ws_url": "wss://ws.opinion.trade/v1",
-      "proxy": "",
-      "metadata": {},
-      "weight": 1.0,
-      "tokens_per_sec": 5,
-      "burst": 10
+      "account_id": "account_1",
+      "exchange": "Polymarket",
+      "private_key": "0xYOUR_PRIVATE_KEY_1",
+      "wallet_address": "0xYourWallet1",
+      "signature_type": 0,
+      "funder_address": "0xYourProxyWallet1",
+      "proxy": "http://user:pass@proxy1.example.com:8080"
     },
     {
-      "account_id": "poly_acc",
+      "account_id": "account_1",
+      "exchange": "Opinion",
+      "private_key": "0xYOUR_PRIVATE_KEY_1",
+      "multi_sig_address": "",
+      "api_key": "",
+      "proxy": "http://user:pass@proxy1.example.com:8080"
+    },
+    {
+      "account_id": "account_2",
       "exchange": "Polymarket",
-      "api_key": "YOUR_POLYMARKET_API_KEY",
-      "secret_key": "YOUR_POLYMARKET_SECRET",
-      "passphrase": "YOUR_POLYMARKET_PASSPHRASE",
-      "wallet_address": "0xYourWallet",
-      "proxy": "",
-      "metadata": {},
-      "weight": 1.0,
-      "tokens_per_sec": 5,
-      "burst": 10
+      "private_key": "0xYOUR_PRIVATE_KEY_2",
+      "wallet_address": "0xYourWallet2",
+      "signature_type": 0,
+      "funder_address": "0xYourProxyWallet2",
+      "proxy": "http://user:pass@proxy2.example.com:8080"
+    },
+    {
+      "account_id": "account_2",
+      "exchange": "Opinion",
+      "private_key": "0xYOUR_PRIVATE_KEY_2",
+      "multi_sig_address": "",
+      "api_key": "",
+      "proxy": "http://user:pass@proxy2.example.com:8080"
     }
-  ]
+  ],
+  "_comment": "account_id groups PM+OP together. multi_sig_address auto-detected if empty. Unique proxy per account."
 }
 

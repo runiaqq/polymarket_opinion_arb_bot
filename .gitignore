@@ -25,13 +25,13 @@ Thumbs.db
 config/accounts.json
 config/settings.yaml
 config/*.local.*
+config/google-service-account.json
 
 # Local data artifacts
 *.db
-data/market_hedge.db
+data/
 diag_out*.txt
 diag_out.txt
 
-# Generated datasets that should stay local
+# Generated datasets
 data/*.bak
-

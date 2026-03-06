@@ -1,16 +1,10 @@
-market_hedge_mode:
+outcome_covered_arbitrage:
   enabled: true
-  hedge_ratio: 1.0
-  max_slippage_market_hedge: 0.005
-  min_spread_for_entry: 0.002
+  min_profit_percent: 0.02        # 2% target minimum profit
   max_position_size_per_market: 50000
   max_position_size_per_event: 200000
-  cancel_unfilled_after_ms: 60000
-  allow_partial_fill_hedge: true
-  hedge_strategy: "FULL"
-  max_slippage_percent: 0.05
-  min_quote_size: 100
-  exposure_tolerance: 5
+  max_position_size_per_account: 200000
+  min_quote_size: 10
 
 exchanges:
   primary: "Opinion"
@@ -21,7 +15,7 @@ double_limit_enabled: true
 
 database:
   backend: "sqlite"
-  dsn: "sqlite+aiosqlite:///./data/market_hedge.db"
+  dsn: "sqlite+aiosqlite:///./data/covered_arb.db"
 
 telegram:
   enabled: false
@@ -40,11 +34,22 @@ rate_limits:
 
 connectivity:
   Opinion:
-    use_websocket: true
+    use_websocket: false
     poll_interval: 2
   Polymarket:
     use_websocket: false
     poll_interval: 5
+
+opinion:
+  websocket:
+    enabled: false
+    url: "wss://ws.opinion.trade"
+    topics:
+      - "trade.order.update"
+      - "trade.record.new"
+    fallback_to_rest: true
+    reconnect_max_delay_sec: 30
+    ping_interval_sec: 20
 
 event_discovery:
   enabled: true
@@ -63,14 +68,52 @@ event_discovery:
   horizon_days_max: 365
   poll_interval_sec: 300
 
+clob_discovery:
+  enabled: true
+  max_events: 20
+  min_liquidity: 0
+  max_spread: 0.05
+  page_size: 200
+  concurrency: 10
+
+manual_match:
+  clob_index_path: "data/polymarket_clob_index.json"
+  clob_ttl_sec: 600
+  candidate_limit: 15
+  page_size: 5
+  refresh_on_start: false
+
+arb_scan_filters:
+  min_horizon_days: 7
+  max_horizon_days: 730
+  allow_crypto_daily: false
+  crypto_min_horizon_days: 14
+  allow_unknown_end_time: false
+  short_horizon_hours: 24
+
+external_feeds:
+  opm_xxlb:
+    enabled: true
+    poll_interval_sec: 300
+    max_items_per_fetch: 20
+    base_url: "https://opm.xxlb.one/"
+    timeout_sec: 20
+
 google_sheets:
   enabled: false
-  sheet_id: ""
-  range: "Sheet1!A1:F100"
+  sheet_id: ""                   # Spreadsheet ID from the URL
+  range: "Sheet1!A1:F100"        # Worksheet name + range
   poll_interval_sec: 60
-  credentials_path: ""
-  mode: "service_account"
-  api_key: ""
+  credentials_path: "config/google-service-account.json"  # service_account mode
+  mode: "service_account"        # service_account | api_key
+  api_key: ""                    # api_key mode only
+
+sheets_monitor:
+  notify_chat_id: null                      # optional; defaults to telegram.chat_id if set
+  poll_interval_sec: 60                     # reuse sheets poll interval by default
+  stale_after_polls: 3                      # mark as STALE after N missed polls
+  notify_on_startup: false                  # send NEW/UPDATED cards on startup
+  max_list_items: 20                        # truncate lists in /pairs* commands
 
 scheduler:
   policy: "round_robin"
@@ -89,4 +132,31 @@ market_pairs:
     secondary_account_id: "poly_acc"
     contract_type: "BINARY"
     strategy_direction: "AUTO"
+
+# Market-Hedge Mode Configuration
+# This is the safest trading mode - any fill is immediately hedged
+market_hedge_mode:
+  enabled: true
+  
+  # Trading parameters
+  hedge_ratio: 1.0                     # 1:1 hedge ratio
+  max_slippage_market_hedge: 0.005     # 0.5 cents max slippage for market hedge
+  min_spread_for_entry: 0.002          # 0.2 cents minimum spread to enter
+  
+  # Position limits
+  max_position_size_per_market: 50000
+  max_position_size_per_event: 200000
+  
+  # Timing
+  cancel_unfilled_after_sec: 60        # Cancel limit orders after 60 seconds
+  poll_interval_sec: 1.0               # Check for fills every second
+  
+  # Fees (for accurate PnL)
+  pm_maker_fee: 0.0
+  pm_taker_fee: 0.0                    # Polymarket no taker fee
+  op_maker_fee: 0.0
+  op_taker_fee: 0.01                   # Opinion 1% taker
+  
+  # Safety
+  allow_partial_fill_hedge: true       # Hedge partial fills
 
